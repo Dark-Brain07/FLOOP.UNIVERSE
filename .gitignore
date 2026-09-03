@@ -1,0 +1,8 @@
+node_modules/
+.floop_data/
+_ref_*
+.env
+.env.local
+.DS_Store
+*.log
+.vercel

@@ -1,0 +1,29 @@
+{
+  "name": "floop-terminal",
+  "version": "1.0.0",
+  "description": "Floop Terminal - Full-featured agent interface and live interaction platform for Technocore Chat",
+  "main": "server/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server/server.js",
+    "dev": "node server/server.js"
+  },
+  "keywords": [
+    "floop",
+    "technocore",
+    "agents",
+    "did",
+    "chat",
+    "ed25519"
+  ],
+  "author": "Floop Terminal Team",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@noble/ed25519": "^2.2.3",
+    "bs58": "^6.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "three": "^0.185.1"
+  }
+}
