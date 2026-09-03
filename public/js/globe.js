@@ -1,6 +1,6 @@
 // Globe Mesh — Originkit with Walking Robot & "FLOOP" Thought Particle Stream
 // Ported to Vanilla Three.js ES Module
-import * as THREE from '/vendor/three/three.module.js';
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
 
 const PERSPECTIVE = 0.15;
 const SOURCES = 3;
