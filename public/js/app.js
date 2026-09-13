@@ -642,38 +642,50 @@ class FloopTerminalApp {
   async loadIdentitiesList() {
     try {
       this.identities = await api.getIdentities();
-      if (!this.identities || this.identities.length === 0) {
-        // Auto-generate initial identity if empty
-        const initial = await api.generateIdentity('Primary-Agent');
-        this.identities = await api.saveIdentity(initial);
+      const savedActiveDid = api.getActiveDid();
+      if (savedActiveDid && this.identities.some((i) => i.did === savedActiveDid)) {
+        this.activeIdentity = this.identities.find((i) => i.did === savedActiveDid);
+      } else if (this.identities && this.identities.length > 0) {
+        this.activeIdentity = this.identities[0];
+        api.setActiveDid(this.activeIdentity.did);
+      } else {
+        this.activeIdentity = null;
+        api.setActiveDid(null);
       }
-      this.activeIdentity = this.identities[0];
       this.updateIdentityDropdowns();
     } catch (err) {
-      console.warn('Failed to load identities:', err.message);
+      console.warn('Failed to load identities from browser storage:', err.message);
     }
   }
 
   updateIdentityDropdowns() {
     // Update compose dropdown
     if (this.elements.composeIdentitySelect) {
-      this.elements.composeIdentitySelect.innerHTML = this.identities
-        .map(
-          (i) =>
-            `<option value="${i.did}" ${i.did === this.activeIdentity?.did ? 'selected' : ''}>${i.alias} (${i.did.slice(8, 14)}…)</option>`
-        )
-        .join('');
+      if (this.identities && this.identities.length > 0) {
+        this.elements.composeIdentitySelect.innerHTML = this.identities
+          .map(
+            (i) =>
+              `<option value="${i.did}" ${i.did === this.activeIdentity?.did ? 'selected' : ''}>${i.alias} (${i.did.slice(8, 14)}…)</option>`
+          )
+          .join('');
+      } else {
+        this.elements.composeIdentitySelect.innerHTML = `<option value="" disabled selected>No saved wallets (Sign Up or use Unsigned)</option>`;
+      }
     }
 
     // Update DID studio dropdown
     const studioSelect = document.getElementById('studioIdentitySelect');
     if (studioSelect) {
-      studioSelect.innerHTML = this.identities
-        .map(
-          (i) =>
-            `<option value="${i.did}" ${i.did === this.activeIdentity?.did ? 'selected' : ''}>${i.alias} (${i.did.slice(8, 14)}…)</option>`
-        )
-        .join('');
+      if (this.identities && this.identities.length > 0) {
+        studioSelect.innerHTML = this.identities
+          .map(
+            (i) =>
+              `<option value="${i.did}" ${i.did === this.activeIdentity?.did ? 'selected' : ''}>${i.alias} (${i.did.slice(8, 14)}…)</option>`
+          )
+          .join('');
+      } else {
+        studioSelect.innerHTML = `<option value="" disabled selected>No identities stored in this browser</option>`;
+      }
     }
 
     this.renderActiveIdentityCard();
@@ -681,7 +693,17 @@ class FloopTerminalApp {
 
   renderActiveIdentityCard() {
     const card = document.getElementById('activeIdentityCard');
-    if (!card || !this.activeIdentity) return;
+    if (!card) return;
+
+    if (!this.activeIdentity) {
+      card.innerHTML = `
+        <div style="padding:12px; text-align:center; color:var(--text-dim); font-size:11px;">
+          No active identity in this browser.<br>
+          Click <strong>+ Generate New DID</strong> or <strong>Sign In</strong> to activate a wallet.
+        </div>
+      `;
+      return;
+    }
 
     card.innerHTML = `
       <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -694,7 +716,25 @@ class FloopTerminalApp {
       <div style="font-family:var(--mono); font-size:10px; color:var(--text-secondary); margin-top:4px;">
         Shard Path: <span class="text-cyan">${this.activeIdentity.notePath}</span>
       </div>
+      <div style="margin-top:8px; display:flex; justify-content:flex-end;">
+        <button id="btnForgetLocalIdentity" class="btn btn-secondary" style="font-size:10px; padding:2px 8px; color:var(--red,#ff4d4f); border-color:rgba(255,77,79,0.3);">
+          🗑️ Forget From This Browser
+        </button>
+      </div>
     `;
+
+    document.getElementById('btnForgetLocalIdentity')?.addEventListener('click', async () => {
+      if (!this.activeIdentity) return;
+      if (!confirm(`Remove "${this.activeIdentity.alias}" from this browser? Make sure you have exported your PEM key or seed before removing!`)) return;
+      const didToRemove = this.activeIdentity.did;
+      this.identities = await api.deleteIdentity(didToRemove);
+      api.setActiveDid(null);
+      this.activeIdentity = this.identities[0] || null;
+      if (this.activeIdentity) api.setActiveDid(this.activeIdentity.did);
+      this.updateIdentityDropdowns();
+      sound.click();
+      this.showToast('Identity removed from this browser storage.', 'info');
+    });
   }
 
   // ------------------------------------------------------------------------
@@ -710,9 +750,10 @@ class FloopTerminalApp {
         const id = await api.generateIdentity(alias);
         this.identities = await api.saveIdentity(id);
         this.activeIdentity = id;
+        api.setActiveDid(id.did);
         this.updateIdentityDropdowns();
         sound.success();
-        this.showToast(`New DID generated: ${id.did.slice(0, 16)}…`, 'success');
+        this.showToast(`New DID generated & saved to this browser: ${id.did.slice(0, 16)}…`, 'success');
       } catch (err) {
         sound.error();
         this.showToast(`DID generation failed: ${err.message}`, 'error');
@@ -721,7 +762,14 @@ class FloopTerminalApp {
 
     const studioSelect = document.getElementById('studioIdentitySelect');
     studioSelect?.addEventListener('change', (e) => {
-      this.activeIdentity = this.identities.find((i) => i.did === e.target.value);
+      this.activeIdentity = this.identities.find((i) => i.did === e.target.value) || null;
+      if (this.activeIdentity) api.setActiveDid(this.activeIdentity.did);
+      this.renderActiveIdentityCard();
+    });
+
+    this.elements.composeIdentitySelect?.addEventListener('change', (e) => {
+      this.activeIdentity = this.identities.find((i) => i.did === e.target.value) || null;
+      if (this.activeIdentity) api.setActiveDid(this.activeIdentity.did);
       this.renderActiveIdentityCard();
     });
 
@@ -1464,10 +1512,10 @@ ${JSON.stringify(result.workflowLog, null, 2)}
       ? this.identities
           .map(
             (i) =>
-              `<option value="${i.did}">${i.alias} — ${i.did.slice(0, 16)}… (${i.did.slice(-8)})</option>`
+              `<option value="${i.did}" ${i.did === this.activeIdentity?.did ? 'selected' : ''}>${i.alias} — ${i.did.slice(0, 16)}… (${i.did.slice(-8)})</option>`
           )
           .join('')
-      : '<option value="" disabled>No saved sessions found. Import or create one below.</option>';
+      : '<option value="" disabled selected>No saved sessions found in this browser. Import or create one below.</option>';
 
     const bodyHtml = `
       <div style="display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap;">
@@ -1480,13 +1528,13 @@ ${JSON.stringify(result.workflowLog, null, 2)}
       <!-- Tab 1: Saved Sessions -->
       <div id="signInPaneSaved" class="signin-pane">
         <div class="control-group">
-          <label class="control-label">Select Saved Agent Session</label>
+          <label class="control-label">Select Saved Agent Session (This Device Only)</label>
           <select id="signInSavedSelect" class="form-select">
             ${savedOptions}
           </select>
         </div>
         <p style="font-size:11px; color:var(--text-secondary); margin-top:4px;">
-          Saved identities are securely persisted in local state storage.
+          🔒 Saved identities are stored strictly in your own browser's local storage and are never shared with or visible to other visitors.
         </p>
         <button id="btnSubmitSignInSaved" class="btn btn-primary button-full" style="margin-top:12px;">Sign In with Saved Identity</button>
       </div>
@@ -1561,12 +1609,17 @@ ${JSON.stringify(result.workflowLog, null, 2)}
     // Handle Tab 1: Saved Identity Sign In
     document.getElementById('btnSubmitSignInSaved')?.addEventListener('click', () => {
       const did = document.getElementById('signInSavedSelect')?.value;
+      if (!did) {
+        alert('No saved identity selected in this browser. Please import or create one.');
+        return;
+      }
       const found = this.identities.find((i) => i.did === did);
       if (!found) {
         alert('Please select or create an identity.');
         return;
       }
       this.activeIdentity = found;
+      api.setActiveDid(found.did);
       this.updateIdentityDropdowns();
       this.closeModal();
       sound.success();
@@ -1609,6 +1662,7 @@ ${JSON.stringify(result.workflowLog, null, 2)}
         identity.alias = identity.alias || `Imported-${identity.did.slice(8, 14)}`;
         this.identities = await api.saveIdentity(identity);
         this.activeIdentity = identity;
+        api.setActiveDid(identity.did);
         this.updateIdentityDropdowns();
         this.closeModal();
         sound.success();
@@ -1642,8 +1696,10 @@ ${JSON.stringify(result.workflowLog, null, 2)}
       }
       try {
         const res = await api.importPem(pem, pass || null, alias || null);
-        this.identities = res.all;
+        if (!res || !res.identity) throw new Error('Could not parse PEM key');
+        this.identities = await api.saveIdentity(res.identity);
         this.activeIdentity = res.identity;
+        api.setActiveDid(res.identity.did);
         this.updateIdentityDropdowns();
         this.closeModal();
         sound.success();
@@ -1666,8 +1722,10 @@ ${JSON.stringify(result.workflowLog, null, 2)}
       try {
         const pemRes = await api.exportPem(hex, null);
         const res = await api.importPem(pemRes.pem, null, alias || 'Seed-Agent');
-        this.identities = res.all;
+        if (!res || !res.identity) throw new Error('Could not parse seed');
+        this.identities = await api.saveIdentity(res.identity);
         this.activeIdentity = res.identity;
+        api.setActiveDid(res.identity.did);
         this.updateIdentityDropdowns();
         this.closeModal();
         sound.success();
@@ -1769,9 +1827,10 @@ ${JSON.stringify(result.workflowLog, null, 2)}
         const pemRes = await api.exportPem(identity.privateKeyHex, passphrase || null);
         const pemString = pemRes.pem;
 
-        // 2. Save identity
+        // 2. Save identity locally to this browser
         this.identities = await api.saveIdentity(identity);
         this.activeIdentity = identity;
+        api.setActiveDid(identity.did);
         this.updateIdentityDropdowns();
 
         // 3. Show result step
@@ -1965,6 +2024,7 @@ ${JSON.stringify(result.workflowLog, null, 2)}
             const newId = await api.generateIdentity(alias);
             this.identities = await api.saveIdentity(newId);
             this.activeIdentity = newId;
+            api.setActiveDid(newId.did);
             wizardIdentity = newId;
             wizardDid = newId.did;
             this.updateIdentityDropdowns();

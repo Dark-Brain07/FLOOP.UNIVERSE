@@ -378,8 +378,8 @@ app.post('/api/crypto/import-pem', async (req, res) => {
     const identity = await importFromPem(pem, passphrase || null);
     identity.alias = alias || `Imported-${identity.did.slice(8, 14)}`;
     identity.createdAt = new Date().toISOString();
-    const saved = saveIdentity(identity);
-    res.json({ identity, all: saved });
+    // Client stores identity strictly in browser localStorage; do not save to server
+    res.json({ identity });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -453,31 +453,18 @@ app.post('/api/crypto/verify-proof', async (req, res) => {
 // -------------------------------------------------------------
 // Identity & Presets Management
 // -------------------------------------------------------------
-
+// NOTE: Identities and private keys are stored strictly in client browser
+// localStorage to ensure complete privacy across users. The server returns empty.
 app.get('/api/identities', (req, res) => {
-  res.json(loadIdentities());
+  res.json([]);
 });
 
 app.post('/api/identities', (req, res) => {
-  try {
-    const identity = req.body;
-    if (!identity || !identity.did || !identity.privateKeyHex) {
-      return res.status(400).json({ error: 'Identity must have did and privateKeyHex' });
-    }
-    const updated = saveIdentity(identity);
-    res.json(updated);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  res.json([]);
 });
 
 app.delete('/api/identities/:did', (req, res) => {
-  try {
-    const updated = deleteIdentity(req.params.did);
-    res.json(updated);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  res.json([]);
 });
 
 app.get('/api/presets', (req, res) => {

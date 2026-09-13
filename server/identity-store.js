@@ -27,48 +27,15 @@ function ensureDataDir() {
 }
 
 export function loadIdentities() {
-  ensureDataDir();
-  try {
-    if (!fs.existsSync(IDENTITIES_FILE)) {
-      return inMemoryIdentities;
-    }
-    const raw = fs.readFileSync(IDENTITIES_FILE, 'utf8');
-    inMemoryIdentities = JSON.parse(raw);
-    return inMemoryIdentities;
-  } catch (err) {
-    console.warn('Error reading identities, using in-memory:', err.message);
-    return inMemoryIdentities;
-  }
+  return [];
 }
 
 export function saveIdentity(identity) {
-  ensureDataDir();
-  const list = loadIdentities();
-  const existingIdx = list.findIndex(i => i.did === identity.did);
-  if (existingIdx >= 0) {
-    list[existingIdx] = { ...list[existingIdx], ...identity, updatedAt: new Date().toISOString() };
-  } else {
-    list.unshift(identity);
-  }
-  inMemoryIdentities = list;
-  try {
-    fs.writeFileSync(IDENTITIES_FILE, JSON.stringify(list, null, 2), 'utf8');
-  } catch (e) {
-    console.warn('Could not persist identity to disk, saved in-memory:', e.message);
-  }
-  return list;
+  return [];
 }
 
 export function deleteIdentity(did) {
-  ensureDataDir();
-  const list = loadIdentities().filter(i => i.did !== did);
-  inMemoryIdentities = list;
-  try {
-    fs.writeFileSync(IDENTITIES_FILE, JSON.stringify(list, null, 2), 'utf8');
-  } catch (e) {
-    console.warn('Could not delete identity on disk, deleted in-memory:', e.message);
-  }
-  return list;
+  return [];
 }
 
 export function loadPresets() {

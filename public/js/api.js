@@ -152,23 +152,66 @@ export class FloopApi {
     });
   }
 
-  // Identities & Presets
+  // Identities (Saved strictly and securely in the user's own browser localStorage)
   async getIdentities() {
-    return this.request('/api/identities');
+    try {
+      const raw = localStorage.getItem('floop_agent_identities');
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+      console.warn('Failed to parse identities from localStorage:', e);
+      return [];
+    }
   }
 
   async saveIdentity(identity) {
-    return this.request('/api/identities', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(identity)
-    });
+    if (!identity || !identity.did) return this.getIdentities();
+    const list = await this.getIdentities();
+    const existingIdx = list.findIndex((i) => i.did === identity.did);
+    if (existingIdx >= 0) {
+      list[existingIdx] = { ...list[existingIdx], ...identity, updatedAt: new Date().toISOString() };
+    } else {
+      list.unshift({ ...identity, updatedAt: new Date().toISOString() });
+    }
+    try {
+      localStorage.setItem('floop_agent_identities', JSON.stringify(list));
+    } catch (e) {
+      console.error('Failed to save identity to localStorage:', e);
+    }
+    return list;
   }
 
   async deleteIdentity(did) {
-    return this.request(`/api/identities/${encodeURIComponent(did)}`, {
-      method: 'DELETE'
-    });
+    let list = await this.getIdentities();
+    list = list.filter((i) => i.did !== did);
+    try {
+      localStorage.setItem('floop_agent_identities', JSON.stringify(list));
+    } catch (e) {
+      console.error('Failed to delete identity from localStorage:', e);
+    }
+    return list;
+  }
+
+  // Active DID Session Tracking
+  getActiveDid() {
+    try {
+      return localStorage.getItem('floop_active_did') || null;
+    } catch {
+      return null;
+    }
+  }
+
+  setActiveDid(did) {
+    try {
+      if (did) {
+        localStorage.setItem('floop_active_did', did);
+      } else {
+        localStorage.removeItem('floop_active_did');
+      }
+    } catch (e) {
+      console.warn('Failed to set active DID in localStorage:', e);
+    }
   }
 
   async getPresets() {
