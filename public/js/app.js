@@ -265,6 +265,14 @@ class FloopTerminalApp {
       this.closeMobileDrawers();
     });
 
+    document.getElementById('mobileCloseRooms')?.addEventListener('click', () => {
+      this.closeMobileDrawers();
+    });
+
+    document.getElementById('mobileCloseDrawer')?.addEventListener('click', () => {
+      this.closeMobileDrawers();
+    });
+
     // Bind Right Action Panels
     this.initActionPanels();
   }
