@@ -58,6 +58,12 @@
   padding: 0;
 }
 
+html, body {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
 body {
   background-color: #060911;
   background-image:
@@ -2416,7 +2422,11 @@ body {
    MOBILE RESPONSIVE ARCHITECTURE (≤ 860px)
    ========================================================================== */
 @media (max-width: 860px) {
-  .desktop-only {
+  .desktop-only,
+  .btn.desktop-only,
+  button.desktop-only,
+  div.desktop-only,
+  span.desktop-only {
     display: none !important;
   }
 
@@ -3098,6 +3108,7 @@ body {
     align-items: center !important;
     gap: 6px !important;
     margin-left: auto !important;
+    flex: 0 0 auto !important;
   }
 
   .chat-msg-actions .btn-icon {
@@ -3124,10 +3135,14 @@ body {
     font-size: 13.5px !important;
     line-height: 1.5 !important;
     color: #E2E8F0 !important;
+    flex: 1 1 100% !important;
     width: 100% !important;
+    min-width: 0 !important;
+    order: 10 !important;
     word-break: break-word !important;
+    overflow-wrap: anywhere !important;
     letter-spacing: -0.1px !important;
-    margin-top: 2px !important;
+    margin-top: 6px !important;
   }
 
   /* =========================================================================
@@ -3565,6 +3580,14 @@ body {
   .modal-footer .btn {
     flex: 1 1 120px;
     min-height: 40px;
+  }
+
+  .desktop-only,
+  .btn.desktop-only,
+  button.desktop-only,
+  div.desktop-only,
+  span.desktop-only {
+    display: none !important;
   }
 }
 
