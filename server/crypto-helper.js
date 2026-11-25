@@ -1,6 +1,10 @@
 import * as ed from '@noble/ed25519';
 import bs58 from 'bs58';
 import crypto from 'crypto';
+import {
+  deriveFlopAddressFromPublic,
+  extractSeedHexFromPhraseOrHex
+} from './flop-testnet.js';
 
 // Single-line unicode sweep matching technocore specs
 export function normalizeMessage(text) {
@@ -20,11 +24,13 @@ export function base64urlDecode(str) {
 export async function generateIdentity(alias = 'Agent-' + Math.floor(Math.random() * 10000)) {
   const privBytes = ed.utils.randomPrivateKey();
   const pubBytes = await ed.getPublicKeyAsync(privBytes);
+  const publicKeyHex = Buffer.from(pubBytes).toString('hex');
   
   // Multicodec 0xed01 + pubBytes
   const multicodec = Buffer.concat([Buffer.from([0xed, 0x01]), Buffer.from(pubBytes)]);
   const multibase = 'z' + bs58.encode(multicodec);
   const did = 'did:key:' + multibase;
+  const flopAddress = await deriveFlopAddressFromPublic(publicKeyHex);
   
   const fingerprint = crypto.createHash('sha256').update(did, 'utf8').digest('hex').slice(0, 16);
   const noteShard = `did-${fingerprint.slice(0, 2)}`;
@@ -34,8 +40,9 @@ export async function generateIdentity(alias = 'Agent-' + Math.floor(Math.random
   return {
     alias,
     privateKeyHex: Buffer.from(privBytes).toString('hex'),
-    publicKeyHex: Buffer.from(pubBytes).toString('hex'),
+    publicKeyHex,
     did,
+    flopAddress,
     fingerprint,
     noteShard,
     noteKey,
@@ -147,20 +154,29 @@ export function privateKeyHexToPem(privateKeyHex, passphrase = null) {
 }
 
 export async function importFromPem(pemString, passphrase = null) {
-  const options = { key: pemString, format: 'pem' };
-  if (passphrase) options.passphrase = passphrase;
-  const keyObj = crypto.createPrivateKey(options);
-  const der = keyObj.export({ type: 'pkcs8', format: 'der' });
-  const privBytes = der.slice(-32);
+  let privBytes;
+  const seedHex = await extractSeedHexFromPhraseOrHex(pemString);
+  if (seedHex) {
+    privBytes = Buffer.from(seedHex, 'hex');
+  } else {
+    const options = { key: pemString, format: 'pem' };
+    if (passphrase) options.passphrase = passphrase;
+    const keyObj = crypto.createPrivateKey(options);
+    const der = keyObj.export({ type: 'pkcs8', format: 'der' });
+    privBytes = der.slice(-32);
+  }
   const pubBytes = await ed.getPublicKeyAsync(privBytes);
+  const publicKeyHex = Buffer.from(pubBytes).toString('hex');
   const multicodec = Buffer.concat([Buffer.from([0xed, 0x01]), Buffer.from(pubBytes)]);
   const multibase = 'z' + bs58.encode(multicodec);
   const did = 'did:key:' + multibase;
+  const flopAddress = await deriveFlopAddressFromPublic(publicKeyHex);
   const fingerprint = crypto.createHash('sha256').update(did, 'utf8').digest('hex').slice(0, 16);
   return {
-    privateKeyHex: privBytes.toString('hex'),
-    publicKeyHex: Buffer.from(pubBytes).toString('hex'),
+    privateKeyHex: Buffer.from(privBytes).toString('hex'),
+    publicKeyHex,
     did,
+    flopAddress,
     fingerprint,
     noteShard: `did-${fingerprint.slice(0, 2)}`,
     noteKey: fingerprint.slice(2, 16),

@@ -6,5 +6,6 @@ _ref_*
 .DS_Store
 *.log
 .vercel
-
-.vercel
+extracted_media/
+inspect_docx.py
+temp_doc.xml

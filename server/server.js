@@ -20,6 +20,13 @@ import {
   loadPresets,
   savePresets
 } from './identity-store.js';
+import {
+  getTestnetStatus,
+  getAccountBalance,
+  claimTestnetFaucet,
+  submitMessageRemarkTx,
+  submitTestnetTransfer
+} from './flop-testnet.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,7 +35,77 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 let TARGET_BASE_URL = process.env.TECHNOCORE_BASE_URL || 'https://technocore.chat';
 
-app.use(cors());
+const ALLOWED_CORS_ORIGINS = new Set(
+  (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+);
+
+function isLoopbackHostname(hostname) {
+  const h = String(hostname || '').toLowerCase();
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]';
+}
+
+function isDisallowedPrivateHost(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return true;
+  if (isLoopbackHostname(h)) return false;
+  if (h === '0.0.0.0' || h.endsWith('.local') || h.endsWith('.internal')) return true;
+  if (/^10\./.test(h) || /^192\.168\./.test(h) || /^169\.254\./.test(h) || /^127\./.test(h)) return true;
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(h)) return true;
+  if (/^(fc|fd|fe80)/i.test(h)) return true;
+  return false;
+}
+
+function validateTargetNodeUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(String(rawUrl || '').trim());
+  } catch {
+    throw new Error('Invalid URL format');
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('Credentials in target URL are not allowed');
+  }
+  const loopback = isLoopbackHostname(parsed.hostname);
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && loopback)) {
+    throw new Error('Target URL must use HTTPS (or http://localhost / http://127.0.0.1)');
+  }
+  if (!loopback && isDisallowedPrivateHost(parsed.hostname)) {
+    throw new Error('Private or link-local hosts are not allowed');
+  }
+  return parsed.origin + parsed.pathname.replace(/\/+$/, '');
+}
+
+function safeDownloadFilename(name, fallback = 'export') {
+  const cleaned = String(name || fallback).replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+  return cleaned || fallback;
+}
+
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  next();
+});
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      if (ALLOWED_CORS_ORIGINS.has(origin)) return callback(null, true);
+      try {
+        const u = new URL(origin);
+        if (isLoopbackHostname(u.hostname) || u.hostname.endsWith('.vercel.app')) {
+          return callback(null, true);
+        }
+      } catch {}
+      return callback(null, false);
+    }
+  })
+);
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -38,8 +115,9 @@ app.use(express.static(path.resolve(__dirname, '../public')));
 app.use('/vendor/three', express.static(path.resolve(__dirname, '../node_modules/three/build')));
 
 // Helper for outbound requests to Technocore
-async function fetchTechnocore(urlPath, options = {}) {
-  const targetUrl = `${TARGET_BASE_URL.replace(/\/$/, '')}${urlPath.startsWith('/') ? '' : '/'}${urlPath}`;
+async function fetchTechnocore(urlPath, options = {}, baseUrlOverride = null) {
+  const base = (baseUrlOverride || TARGET_BASE_URL).replace(/\/$/, '');
+  const targetUrl = `${base}${urlPath.startsWith('/') ? '' : '/'}${urlPath}`;
   const headers = {
     'User-Agent': 'FloopTerminal/1.0.0 (Mozilla/5.0; AI-Agent-Interface)',
     ...(options.headers || {})
@@ -53,6 +131,7 @@ async function fetchTechnocore(urlPath, options = {}) {
     const res = await fetch(targetUrl, {
       ...options,
       headers,
+      redirect: 'error',
       signal: controller.signal
     });
     clearTimeout(timer);
@@ -88,10 +167,24 @@ app.post('/api/config/target', async (req, res) => {
   if (!url || typeof url !== 'string') {
     return res.status(400).json({ error: 'Valid URL is required' });
   }
-  const cleanUrl = url.trim().replace(/\/$/, '');
+  if (process.env.VERCEL && process.env.ALLOW_TARGET_SWITCH !== 'true') {
+    return res.status(403).json({
+      error: 'Switching global target node is disabled on shared serverless hosting',
+      targetBaseUrl: TARGET_BASE_URL
+    });
+  }
+  let cleanUrl;
   try {
-    // Test connectivity
-    const testRes = await fetchTechnocore('/rooms?format=json&limit=1', { timeout: 8000 });
+    cleanUrl = validateTargetNodeUrl(url);
+  } catch (err) {
+    return res.status(400).json({ error: err.message, targetBaseUrl: TARGET_BASE_URL });
+  }
+  try {
+    // Test connectivity against the proposed URL before activating it
+    const testRes = await fetchTechnocore('/rooms?format=json&limit=1', { timeout: 8000 }, cleanUrl);
+    if (!testRes.ok || typeof testRes.data !== 'object') {
+      throw new Error(`Target node returned HTTP ${testRes.status} (expected JSON /rooms response)`);
+    }
     TARGET_BASE_URL = cleanUrl;
     res.json({
       success: true,
@@ -153,6 +246,13 @@ app.post('/api/proxy/r/:room', async (req, res) => {
   }
 });
 
+// Helper to send upstream raw text without HTML sniffing
+function sendPlainProxy(res, result) {
+  res.type('text/plain; charset=utf-8');
+  const payload = typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
+  res.status(result.status).send(payload);
+}
+
 // GET Say (Unsigned write via GET)
 app.get('/api/proxy/r/:room/say/:nick/:text', async (req, res) => {
   try {
@@ -161,7 +261,7 @@ app.get('/api/proxy/r/:room/say/:nick/:text', async (req, res) => {
       `/r/${encodeURIComponent(room)}/say/${encodeURIComponent(nick)}/${encodeURIComponent(text)}`,
       { timeout: 10000 }
     );
-    res.status(result.status).send(result.data);
+    sendPlainProxy(res, result);
   } catch (err) {
     res.status(502).json({ error: `Proxy GET say failed: ${err.message}` });
   }
@@ -175,7 +275,7 @@ app.get('/api/proxy/r/:room/say-signed/:did/:sig/:nonce/:text', async (req, res)
       `/r/${encodeURIComponent(room)}/say-signed/${encodeURIComponent(did)}/${encodeURIComponent(sig)}/${encodeURIComponent(nonce)}/${encodeURIComponent(text)}`,
       { timeout: 10000 }
     );
-    res.status(result.status).send(result.data);
+    sendPlainProxy(res, result);
   } catch (err) {
     res.status(502).json({ error: `Proxy GET say-signed failed: ${err.message}` });
   }
@@ -186,9 +286,10 @@ app.get('/api/proxy/r/:room/export', async (req, res) => {
   try {
     const { room } = req.params;
     const result = await fetchTechnocore(`/r/${encodeURIComponent(room)}/export`, { timeout: 20000 });
+    const safeRoom = safeDownloadFilename(room, 'room');
     res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${room}-export.jsonl"`);
-    res.status(result.status).send(result.data);
+    res.setHeader('Content-Disposition', `attachment; filename="${safeRoom}-export.jsonl"`);
+    res.status(result.status).send(typeof result.data === 'string' ? result.data : JSON.stringify(result.data));
   } catch (err) {
     res.status(502).json({ error: `Export failed: ${err.message}` });
   }
@@ -205,7 +306,7 @@ app.get('/api/proxy/kv/:ns/:key', async (req, res) => {
     const result = await fetchTechnocore(`/kv/${encodeURIComponent(ns)}/${encodeURIComponent(key)}`, {
       timeout: 10000
     });
-    res.status(result.status).send(result.data);
+    sendPlainProxy(res, result);
   } catch (err) {
     res.status(502).json({ error: `Read note failed: ${err.message}` });
   }
@@ -221,7 +322,7 @@ app.post('/api/proxy/kv/:ns/:key', async (req, res) => {
       body: JSON.stringify(req.body),
       timeout: 10000
     });
-    res.status(result.status).send(result.data);
+    sendPlainProxy(res, result);
   } catch (err) {
     res.status(502).json({ error: `Write note failed: ${err.message}` });
   }
@@ -244,7 +345,7 @@ app.get('/api/proxy/kv/:ns', async (req, res) => {
 app.get('/api/proxy/config', async (req, res) => {
   try {
     const result = await fetchTechnocore('/config', { timeout: 8000 });
-    res.status(result.status).send(result.data);
+    sendPlainProxy(res, result);
   } catch (err) {
     res.status(502).json({ error: `Config fetch failed: ${err.message}` });
   }
@@ -274,7 +375,7 @@ app.get('/api/proxy/openapi', async (req, res) => {
 app.get('/api/proxy/llms', async (req, res) => {
   try {
     const result = await fetchTechnocore('/llms.txt', { timeout: 8000 });
-    res.status(result.status).send(result.data);
+    sendPlainProxy(res, result);
   } catch (err) {
     res.status(502).json({ error: `Manual fetch failed: ${err.message}` });
   }
@@ -284,7 +385,7 @@ app.get('/api/proxy/llms', async (req, res) => {
 app.get('/api/proxy/skill', async (req, res) => {
   try {
     const result = await fetchTechnocore('/skill.md', { timeout: 8000 });
-    res.status(result.status).send(result.data);
+    sendPlainProxy(res, result);
   } catch (err) {
     res.status(502).json({ error: `Skill fetch failed: ${err.message}` });
   }
@@ -294,7 +395,7 @@ app.get('/api/proxy/skill', async (req, res) => {
 app.get('/api/proxy/patterns', async (req, res) => {
   try {
     const result = await fetchTechnocore('/patterns.md', { timeout: 8000 });
-    res.status(result.status).send(result.data);
+    sendPlainProxy(res, result);
   } catch (err) {
     res.status(502).json({ error: `Patterns fetch failed: ${err.message}` });
   }
@@ -304,7 +405,7 @@ app.get('/api/proxy/patterns', async (req, res) => {
 app.get('/api/proxy/auth', async (req, res) => {
   try {
     const result = await fetchTechnocore('/auth.md', { timeout: 8000 });
-    res.status(result.status).send(result.data);
+    sendPlainProxy(res, result);
   } catch (err) {
     res.status(502).json({ error: `Auth doc fetch failed: ${err.message}` });
   }
@@ -315,7 +416,7 @@ app.get('/api/ownership/room-nonce/:room', async (req, res) => {
   try {
     const { room } = req.params;
     const result = await fetchTechnocore(`/kv/room-nonce/${encodeURIComponent(room)}`, { timeout: 8000 });
-    res.status(result.status).send(result.data);
+    sendPlainProxy(res, result);
   } catch (err) {
     res.status(502).json({ error: `Nonce check failed: ${err.message}` });
   }
@@ -447,6 +548,81 @@ app.post('/api/crypto/verify-proof', async (req, res) => {
     res.json({ valid: isValid });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// -------------------------------------------------------------
+// FLOP Testnet On-Chain RPC (wss://testnet.flop.network/)
+// -------------------------------------------------------------
+app.get('/api/testnet/status', async (req, res) => {
+  try {
+    const status = await getTestnetStatus();
+    res.json(status);
+  } catch (err) {
+    res.status(502).json({ error: `FLOP Testnet RPC unavailable: ${err.message}` });
+  }
+});
+
+app.get('/api/testnet/balance/:address', async (req, res) => {
+  try {
+    const balance = await getAccountBalance(req.params.address);
+    res.json(balance);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/testnet/faucet-claim', async (req, res) => {
+  try {
+    const { privateKeyHex, nonce } = req.body;
+    if (!privateKeyHex) {
+      return res.status(400).json({ error: 'Missing privateKeyHex' });
+    }
+    const result = await claimTestnetFaucet(privateKeyHex, nonce || null);
+    res.status(result.success ? 200 : result.httpStatus || 502).json(result);
+  } catch (err) {
+    res.status(500).json({ error: `Faucet claim failed: ${err.message}` });
+  }
+});
+
+app.post('/api/testnet/submit-message-tx', async (req, res) => {
+  try {
+    const { privateKeyHex, room, did, text, nonce, sig, autoClaim, faucetNonce, waitForFinality } = req.body;
+    if (!privateKeyHex || !room || !text) {
+      return res.status(400).json({ error: 'Missing privateKeyHex, room, or text' });
+    }
+    const receipt = await submitMessageRemarkTx({
+      privateKeyHex,
+      room,
+      did,
+      text,
+      nonce,
+      messageSig: sig,
+      autoClaim: autoClaim !== false,
+      faucetNonce: faucetNonce || null,
+      waitForFinality: Boolean(waitForFinality)
+    });
+    res.json(receipt);
+  } catch (err) {
+    res.status(500).json({ submitted: false, error: err.message });
+  }
+});
+
+app.post('/api/testnet/transfer', async (req, res) => {
+  try {
+    const { privateKeyHex, toAddress, amountFlop, waitForFinality } = req.body;
+    if (!privateKeyHex || !toAddress || !amountFlop) {
+      return res.status(400).json({ error: 'Missing privateKeyHex, toAddress, or amountFlop' });
+    }
+    const receipt = await submitTestnetTransfer({
+      privateKeyHex,
+      toAddress,
+      amountFlop,
+      waitForFinality: Boolean(waitForFinality)
+    });
+    res.json(receipt);
+  } catch (err) {
+    res.status(400).json({ submitted: false, error: err.message });
   }
 });
 

@@ -21,7 +21,10 @@ export class FloopApi {
     const body = isJson ? await res.json() : await res.text();
     if (!res.ok) {
       const errMsg = typeof body === 'object' && body.error ? body.error : (typeof body === 'string' && body.trim() ? body.trim() : `HTTP ${res.status}`);
-      throw new Error(errMsg);
+      const err = new Error(errMsg);
+      err.status = res.status;
+      err.data = body;
+      throw err;
     }
     return body;
   }
@@ -288,6 +291,39 @@ export class FloopApi {
 
   async getAuthDoc() {
     return this.request('/api/proxy/auth');
+  }
+
+  // FLOP Testnet On-Chain Endpoints (wss://testnet.flop.network/)
+  async getTestnetStatus() {
+    return this.request('/api/testnet/status');
+  }
+
+  async getTestnetBalance(addressOrDidOrPub) {
+    return this.request(`/api/testnet/balance/${encodeURIComponent(addressOrDidOrPub)}`);
+  }
+
+  async claimTestnetFaucet(privateKeyHex, nonce = null) {
+    return this.request('/api/testnet/faucet-claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ privateKeyHex, nonce })
+    });
+  }
+
+  async submitTestnetMessageTx({ privateKeyHex, room, did, text, nonce, sig, autoClaim = true, faucetNonce = null }) {
+    return this.request('/api/testnet/submit-message-tx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ privateKeyHex, room, did, text, nonce, sig, autoClaim, faucetNonce })
+    });
+  }
+
+  async submitTestnetTransfer({ privateKeyHex, toAddress, amountFlop }) {
+    return this.request('/api/testnet/transfer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ privateKeyHex, toAddress, amountFlop })
+    });
   }
 }
 

@@ -20,6 +20,10 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@noble/ed25519": "^2.2.3",
+    "@polkadot/api": "^17.0.1",
+    "@polkadot/keyring": "^14.0.3",
+    "@polkadot/util": "^14.0.3",
+    "@polkadot/util-crypto": "^14.0.3",
     "bs58": "^6.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",

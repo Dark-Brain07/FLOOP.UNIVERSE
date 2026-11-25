@@ -5,7 +5,7 @@
 
 import { api } from './api.js';
 import { sound } from './sound.js';
-import { initGlobe } from './globe.js';
+import { initLandingScene } from './landing-scene.js';
 
 class FloopTerminalApp {
   constructor() {
@@ -21,24 +21,121 @@ class FloopTerminalApp {
     this.activeIdentity = null;
     this.roomsCache = [];
     this.filterQuery = '';
-    this.globeInstance = null;
+    this.landingScene = null;
+    this.txReceipts = this.loadTxReceipts();
 
     // Cache elements
     this.elements = {};
   }
 
+  loadTxReceipts() {
+    try {
+      const raw = localStorage.getItem('floop_testnet_tx_receipts');
+      const parsed = raw ? JSON.parse(raw) : {};
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  getTxReceipt(room, nonce) {
+    if (!room || !nonce) return null;
+    return this.txReceipts[`${room}:${nonce}`] || null;
+  }
+
+  safeExternalUrl(url, fallback = 'https://testnet.flopscan.io/blocks') {
+    return typeof url === 'string' && /^https:\/\//i.test(url.trim()) ? url.trim() : fallback;
+  }
+
+  saveTxReceipt(room, nonce, receipt) {
+    if (!room || !nonce || !receipt?.txHash) return;
+    const key = `${room}:${nonce}`;
+    const defaultExplorer = `https://testnet.flopscan.io/transactions/${encodeURIComponent(receipt.txHash)}`;
+    this.txReceipts[key] = {
+      txHash: receipt.txHash,
+      blockHash: receipt.blockHash || null,
+      blockNumber: receipt.blockNumber ?? null,
+      explorerUrl: this.safeExternalUrl(receipt.explorerUrl, defaultExplorer),
+      savedAt: Date.now()
+    };
+    const keys = Object.keys(this.txReceipts);
+    if (keys.length > 150) {
+      keys
+        .sort((a, b) => (this.txReceipts[a]?.savedAt || 0) - (this.txReceipts[b]?.savedAt || 0))
+        .slice(0, keys.length - 150)
+        .forEach((k) => delete this.txReceipts[k]);
+    }
+    try {
+      localStorage.setItem('floop_testnet_tx_receipts', JSON.stringify(this.txReceipts));
+    } catch {}
+  }
+
+  createTxBadgeElement(receipt) {
+    const a = document.createElement('a');
+    a.className = 'badge-tx';
+    const fallbackUrl = `https://testnet.flopscan.io/transactions/${encodeURIComponent(receipt.txHash || '')}`;
+    a.href = this.safeExternalUrl(receipt.explorerUrl, fallbackUrl);
+    a.target = '_blank';
+    a.rel = 'noopener';
+    const blkLabel = receipt.blockNumber ? ` · #${receipt.blockNumber}` : '';
+    a.title = `FLOP Testnet Confirmed${blkLabel} · TX ${receipt.txHash}`;
+    a.textContent = `⛓ TX ${receipt.txHash.slice(0, 8)}…${blkLabel}`;
+    return a;
+  }
+
+  getPendingFaucetNonce(address) {
+    if (!address) return null;
+    try {
+      const key = `flop:faucet:nonce:${address}`;
+      let nonce = localStorage.getItem(key);
+      if (!nonce) {
+        nonce = Date.now().toString();
+        localStorage.setItem(key, nonce);
+      }
+      return nonce;
+    } catch {
+      return Date.now().toString();
+    }
+  }
+
+  reconcileFaucetNonce(address, outcome) {
+    if (!address || !outcome) return;
+    const key = `flop:faucet:nonce:${address}`;
+    try {
+      if (outcome.success || outcome.status === 'finalized' || ['transfer_failed', 'nonce_reused'].includes(outcome.reason)) {
+        localStorage.removeItem(key);
+      } else if (outcome.nonce) {
+        localStorage.setItem(key, String(outcome.nonce));
+      }
+    } catch {}
+  }
+
+  attachTxBadgeToRow(room, nonce, receipt) {
+    if (!this.elements.chatStreamBody || !receipt?.txHash) return;
+    const rows = this.elements.chatStreamBody.querySelectorAll('.chat-msg-row');
+    for (const row of rows) {
+      if (row.dataset.msgRoom === room && row.dataset.msgNonce === String(nonce)) {
+        const whoEl = row.querySelector('.chat-msg-who');
+        if (whoEl && !whoEl.querySelector('.badge-tx')) {
+          whoEl.appendChild(this.createTxBadgeElement(receipt));
+        }
+      }
+    }
+  }
+
   async init() {
     this.bindDOMElements();
     this.initEventListeners();
+    this.setComposeMode('signed');
     this.parseUrlHash();
 
-    // Initialize 3D Globe Mesh background for landing page
-    const globeContainer = document.getElementById('globeContainer');
-    if (globeContainer) {
+    // Initialize crimson flying road & infinite-run robot scene for landing page
+    const landingSceneContainer = document.getElementById('landingSceneContainer');
+    if (landingSceneContainer) {
       try {
-        this.globeInstance = initGlobe(globeContainer);
+        this.landingScene = initLandingScene(landingSceneContainer);
       } catch (e) {
-        console.warn('Globe initialization error:', e);
+        console.warn('Landing scene initialization error:', e);
       }
     }
 
@@ -51,10 +148,12 @@ class FloopTerminalApp {
 
     // Check if initial URL asks directly for the Universe
     const hash = window.location.hash;
-    if (hash && (hash.startsWith('#/r/') || hash.startsWith('#r/') || hash === '#/universe')) {
+    const skipLanding = !!(hash && (hash.startsWith('#/r/') || hash.startsWith('#r/') || hash === '#/universe'));
+    if (skipLanding) {
       const landing = document.getElementById('landingView');
       if (landing) landing.classList.add('hidden');
     }
+    this.landingScene?.setPaused(skipLanding);
 
     // Load presets and identities
     await this.loadIdentitiesList();
@@ -79,6 +178,8 @@ class FloopTerminalApp {
       hudTotalNotes: document.getElementById('hudTotalNotes'),
       hudRateBudget: document.getElementById('hudRateBudget'),
       hudTargetNode: document.getElementById('hudTargetNode'),
+      hudTestnetBlock: document.getElementById('hudTestnetBlock'),
+      hudTestnetLink: document.getElementById('hudTestnetLink'),
       soundToggleBtn: document.getElementById('soundToggleBtn'),
       targetConfigBtn: document.getElementById('targetConfigBtn'),
 
@@ -127,15 +228,29 @@ class FloopTerminalApp {
   }
 
   initEventListeners() {
-    // Sound Toggle
-    this.elements.soundToggleBtn?.addEventListener('click', () => {
+    // Sound Toggle (Desktop + Mobile)
+    const handleSoundToggle = () => {
       const isMuted = sound.toggleMute();
-      this.elements.soundToggleBtn.textContent = isMuted ? '🔇 Audio Off' : '🔊 Audio On';
+      const label = this.elements.soundToggleBtn?.querySelector('.btn-label');
+      if (label) label.textContent = isMuted ? 'Audio Off' : 'Audio On';
+      else if (this.elements.soundToggleBtn) this.elements.soundToggleBtn.textContent = isMuted ? 'Audio Off' : 'Audio On';
+      const mobileSoundBtn = document.getElementById('mobileBtnSound');
+      if (mobileSoundBtn) mobileSoundBtn.textContent = isMuted ? 'Muted' : 'Audio';
       this.showToast(isMuted ? 'Sound effects muted' : 'Sound effects active', 'info');
-    });
+    };
+    this.elements.soundToggleBtn?.addEventListener('click', handleSoundToggle);
+    document.getElementById('mobileBtnSound')?.addEventListener('click', handleSoundToggle);
 
-    // Target Node Config
+    // Target Node Config & Mobile Onboarding
     this.elements.targetConfigBtn?.addEventListener('click', () => this.showTargetConfigModal());
+    document.getElementById('mobileBtnSwitchHub')?.addEventListener('click', () => {
+      this.closeMobileDrawers?.();
+      this.showTargetConfigModal();
+    });
+    document.getElementById('mobileBtnOnboarding')?.addEventListener('click', () => {
+      this.closeMobileDrawers?.();
+      this.showOnboardingWizardModal();
+    });
 
     // Search Rooms
     this.elements.roomSearchInput?.addEventListener('input', (e) => {
@@ -157,7 +272,9 @@ class FloopTerminalApp {
 
     this.elements.autoPollToggleBtn?.addEventListener('click', () => {
       this.pollingActive = !this.pollingActive;
-      this.elements.autoPollToggleBtn.textContent = this.pollingActive ? '⚡ Live: ON' : '⏸️ Live: OFF';
+      const label = this.elements.autoPollToggleBtn.querySelector('.btn-label');
+      if (label) label.textContent = this.pollingActive ? 'Live: ON' : 'Live: OFF';
+      else this.elements.autoPollToggleBtn.textContent = this.pollingActive ? 'Live: ON' : 'Live: OFF';
       this.elements.autoPollToggleBtn.classList.toggle('btn-green', this.pollingActive);
       this.elements.autoPollToggleBtn.classList.toggle('btn-secondary', !this.pollingActive);
       if (this.pollingActive) this.startPollLoop();
@@ -214,6 +331,36 @@ class FloopTerminalApp {
         this.handleCliCommand(this.elements.cliInput.value);
         this.elements.cliInput.value = '';
       }
+    });
+
+    // Keyboard shortcut Cmd/Ctrl+K focuses Room Search
+    document.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        const landing = document.getElementById('landingView');
+        if (landing && !landing.classList.contains('hidden')) return;
+        e.preventDefault();
+        this.elements.roomSearchInput?.focus();
+        this.elements.roomSearchInput?.select();
+      }
+    });
+
+    // Sidebar Quick Dock Shortcuts
+    document.getElementById('quickNavHome')?.addEventListener('click', () => {
+      sound.click();
+      this.openRoom('lobby');
+    });
+    document.getElementById('quickNavStudio')?.addEventListener('click', () => {
+      sound.click();
+      document.querySelector('[data-tab="did"]')?.click();
+      if (window.innerWidth <= 1024) document.getElementById('mobileToggleDrawer')?.click();
+    });
+    document.getElementById('quickNavTelemetry')?.addEventListener('click', () => {
+      sound.click();
+      document.querySelector('[data-tab="telemetry"]')?.click();
+      if (window.innerWidth <= 1024) document.getElementById('mobileToggleDrawer')?.click();
+    });
+    document.getElementById('quickNavSettings')?.addEventListener('click', () => {
+      this.showTargetConfigModal();
     });
 
     // Hash Change
@@ -310,10 +457,14 @@ class FloopTerminalApp {
     // Update Room Header
     this.updateRoomHeaderUI();
 
+    if (this.currentRoom === 'lobby') {
+      this.setComposeMode('signed');
+    }
+
     // Clear Chat
     this.elements.chatStreamBody.innerHTML = `
       <div class="empty-chat-state">
-        <div class="pulse-badge" style="margin-bottom:8px">CONNECTING TO #${this.currentRoom}</div>
+        <div class="pulse-badge" style="margin-bottom:8px">CONNECTING TO #${this.escapeHtml(this.currentRoom)}</div>
         <div>Subscribing to sequence ring...</div>
       </div>
     `;
@@ -334,7 +485,7 @@ class FloopTerminalApp {
     else if (this.currentRoom.startsWith('d-')) prefixTag = '<span class="room-prefix-tag prefix-d">OWNED</span>';
     else if (this.currentRoom.startsWith('e-')) prefixTag = '<span class="room-prefix-tag prefix-e">EPHEMERAL</span>';
 
-    this.elements.currentRoomTitle.innerHTML = `#${this.currentRoom} ${prefixTag}`;
+    this.elements.currentRoomTitle.innerHTML = `#${this.escapeHtml(this.currentRoom)} ${prefixTag}`;
     
     // Find topic from cached room
     const cached = this.roomsCache.find((r) => r.room === this.currentRoom);
@@ -384,7 +535,7 @@ class FloopTerminalApp {
       } else if (this.elements.chatStreamBody.querySelector('.empty-chat-state')) {
         this.elements.chatStreamBody.innerHTML = `
           <div class="empty-chat-state">
-            <div style="color:var(--text-secondary); margin-bottom: 6px;">#${room} is currently empty</div>
+            <div style="color:var(--text-secondary); margin-bottom: 6px;">#${this.escapeHtml(room)} is currently empty</div>
             <div style="font-size:11px;">Send a message or check in using the compose bar below.</div>
           </div>
         `;
@@ -414,6 +565,10 @@ class FloopTerminalApp {
       const row = document.createElement('div');
       row.className = 'chat-msg-row';
       row.id = `msg-${msg.seq}`;
+      row.dataset.msgRoom = this.currentRoom;
+      if (msg.nonce) {
+        row.dataset.msgNonce = String(msg.nonce);
+      }
       if (this.targetSeq && msg.seq === this.targetSeq) {
         row.classList.add('target-highlight');
       }
@@ -436,13 +591,21 @@ class FloopTerminalApp {
       whoEl.className = 'chat-msg-who';
 
       if (msg.from && msg.from.startsWith('did:key:z')) {
-        const shortDid = `${msg.from.slice(8, 12)}…${msg.from.slice(-4)}`;
-        whoEl.innerHTML = `<span class="badge-did" title="${msg.from}">🛡️ ${shortDid}</span>`;
+        const safeFrom = this.escapeHtml(msg.from);
+        const shortDid = this.escapeHtml(`z6Mk…${msg.from.slice(-4)}`);
+        whoEl.innerHTML = `<span class="badge-did" title="${safeFrom}"><svg class="ui-svg did-gem-svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6 3 18 3 22 9 12 21 2 9"/></svg>${shortDid}</span>`;
         whoEl.querySelector('.badge-did')?.addEventListener('click', () => {
           this.showDidDetailModal(msg.from, msg);
         });
       } else {
-        whoEl.innerHTML = `<span class="badge-nick">~${msg.from || 'anon'}</span>`;
+        whoEl.innerHTML = `<span class="badge-nick">~${this.escapeHtml(msg.from || 'anon')}</span>`;
+      }
+
+      if (msg.nonce) {
+        const txReceipt = this.getTxReceipt(this.currentRoom, msg.nonce);
+        if (txReceipt) {
+          whoEl.appendChild(this.createTxBadgeElement(txReceipt));
+        }
       }
 
       // Message text
@@ -458,7 +621,7 @@ class FloopTerminalApp {
       const replyBtn = document.createElement('button');
       replyBtn.className = 'btn-icon';
       replyBtn.title = 'Reply';
-      replyBtn.innerHTML = '↩️';
+      replyBtn.innerHTML = `<svg class="ui-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>`;
       replyBtn.addEventListener('click', () => {
         this.elements.composeTextInput.value = `@#${msg.seq} `;
         this.elements.composeTextInput.focus();
@@ -468,7 +631,7 @@ class FloopTerminalApp {
       const verifyBtn = document.createElement('button');
       verifyBtn.className = 'btn-icon';
       verifyBtn.title = 'Verify Signature';
-      verifyBtn.innerHTML = '🔍';
+      verifyBtn.innerHTML = `<svg class="ui-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>`;
       verifyBtn.addEventListener('click', () => this.verifyMessageSignature(msg));
 
       actionsEl.appendChild(replyBtn);
@@ -501,20 +664,26 @@ class FloopTerminalApp {
   // Compose & Send Messages
   // ------------------------------------------------------------------------
   setComposeMode(mode) {
+    const nickWrap = document.getElementById('composeNickWrap');
+    const sendLabel = this.elements.composeSendBtn?.querySelector('.btn-label');
     if (mode === 'unsigned') {
       this.elements.modeUnsignedBtn.classList.add('active');
       this.elements.modeSignedBtn.classList.remove('active', 'signed-mode');
+      if (nickWrap) nickWrap.style.display = 'inline-flex';
       this.elements.composeNickInput.style.display = 'block';
       this.elements.composeIdentitySelect.style.display = 'none';
       this.elements.composeSendBtn.className = 'btn btn-primary';
-      this.elements.composeSendBtn.textContent = 'Send Plain';
+      if (sendLabel) sendLabel.textContent = 'Send Message';
+      else this.elements.composeSendBtn.textContent = 'Send Message';
     } else {
       this.elements.modeSignedBtn.classList.add('active', 'signed-mode');
       this.elements.modeUnsignedBtn.classList.remove('active');
+      if (nickWrap) nickWrap.style.display = 'none';
       this.elements.composeNickInput.style.display = 'none';
       this.elements.composeIdentitySelect.style.display = 'block';
       this.elements.composeSendBtn.className = 'btn btn-green';
-      this.elements.composeSendBtn.textContent = 'Sign & Post';
+      if (sendLabel) sendLabel.textContent = 'Sign & Post';
+      else this.elements.composeSendBtn.textContent = 'Sign & Post';
     }
   }
 
@@ -523,6 +692,7 @@ class FloopTerminalApp {
     if (!text) return;
 
     const isSigned = this.elements.modeSignedBtn.classList.contains('active');
+    const sendLabel = this.elements.composeSendBtn?.querySelector('.btn-label');
     this.elements.composeSendBtn.disabled = true;
 
     try {
@@ -534,46 +704,117 @@ class FloopTerminalApp {
         this.elements.composeTextInput.value = '';
         this.pollMessages(true);
       } else {
-        // Cryptographic Signed Send
+        // Cryptographic Signed Send + Real FLOP Testnet On-Chain Transaction
         const did = this.elements.composeIdentitySelect.value;
         const identity = this.identities.find((i) => i.did === did);
         if (!identity) {
           throw new Error('Please select an active identity in the DID Studio or generate one first.');
         }
 
+        if (sendLabel) sendLabel.textContent = 'Posting & TX…';
+
         const signed = await api.signMessage(identity.privateKeyHex, this.currentRoom, null, text);
-        await api.postSignedMessage(this.currentRoom, {
-          did: identity.did,
-          sig: signed.sig,
-          nonce: signed.nonce,
-          text: signed.normalized
-        });
+        const addrForFaucet = identity.flopAddress || this.activeTestnetBalance?.ss58Address || '';
+        const pendingFaucetNonce = addrForFaucet ? this.getPendingFaucetNonce(addrForFaucet) : null;
+        const [chatSettled, txSettled] = await Promise.allSettled([
+          api.postSignedMessage(this.currentRoom, {
+            did: identity.did,
+            sig: signed.sig,
+            nonce: signed.nonce,
+            text: signed.normalized
+          }),
+          api.submitTestnetMessageTx({
+            privateKeyHex: identity.privateKeyHex,
+            room: this.currentRoom,
+            did: identity.did,
+            text: signed.normalized,
+            nonce: signed.nonce,
+            sig: signed.sig,
+            autoClaim: true,
+            faucetNonce: pendingFaucetNonce
+          })
+        ]);
+
+        if (chatSettled.status === 'rejected') {
+          throw chatSettled.reason;
+        }
+
         sound.send();
         this.elements.composeTextInput.value = '';
-        this.showToast('Signed message posted successfully!', 'success');
         this.pollMessages(true);
+
+        const txRes =
+          txSettled.status === 'fulfilled'
+            ? txSettled.value
+            : { submitted: false, error: txSettled.reason?.message };
+
+        if (txRes?.faucetAttempt && (txRes.address || addrForFaucet)) {
+          this.reconcileFaucetNonce(txRes.address || addrForFaucet, txRes.faucetAttempt);
+        }
+
+        if (txRes?.submitted && txRes?.txHash) {
+          this.saveTxReceipt(this.currentRoom, signed.nonce, txRes);
+          this.attachTxBadgeToRow(this.currentRoom, signed.nonce, txRes);
+          this.refreshActiveWalletBalance?.();
+          this.refreshTestnetStatus();
+          this.showToast(
+            `On-chain FLOP Testnet TX confirmed${txRes.blockNumber ? ` (#${txRes.blockNumber})` : ''}: ${txRes.txHash.slice(0, 12)}…`,
+            'success'
+          );
+        } else {
+          this.refreshActiveWalletBalance?.();
+          const skipReason = txRes?.error || txRes?.reason || 'Wallet has 0 FLOP for gas';
+          this.showToast(`Posted signed chat · FLOP Testnet TX skipped: ${skipReason}`, 'warn');
+        }
       }
     } catch (err) {
       sound.error();
       this.showToast(`Send failed: ${err.message}`, 'error');
     } finally {
       this.elements.composeSendBtn.disabled = false;
+      if (sendLabel) {
+        sendLabel.textContent = this.elements.modeSignedBtn.classList.contains('active')
+          ? 'Sign & Post'
+          : 'Send Message';
+      }
     }
   }
 
   // ------------------------------------------------------------------------
   // Telemetry & Room List
   // ------------------------------------------------------------------------
+  async refreshTestnetStatus() {
+    if (!this.elements.hudTestnetBlock) return;
+    try {
+      const status = await api.getTestnetStatus();
+      this.testnetStatus = status;
+      this.elements.hudTestnetBlock.textContent = `#${Number(status.finalizedBlockNumber).toLocaleString()} · Live`;
+      if (this.elements.hudTestnetLink && status.blockExplorerUrl) {
+        this.elements.hudTestnetLink.href = this.safeExternalUrl(
+          status.blockExplorerUrl,
+          'https://testnet.flopscan.io/blocks'
+        );
+      }
+    } catch (err) {
+      this.elements.hudTestnetBlock.textContent = 'Offline';
+    }
+  }
+
   async refreshTelemetryAndRooms() {
     try {
+      this.refreshTestnetStatus();
       const data = await api.listRooms(200);
       if (data && data.rooms) {
         this.roomsCache = data.rooms;
         this.renderRoomsList();
 
-        // Update HUD
+        // Update HUD & Events Count
+        const eventsBadge = document.getElementById('eventsBadgeCount');
+        if (eventsBadge) {
+          eventsBadge.textContent = `${data.rooms.length}`;
+        }
         if (this.elements.hudTotalRooms) {
-          this.elements.hudTotalRooms.textContent = `${data.total || 0} / ${data.capacity || '81.9k'}`;
+          this.elements.hudTotalRooms.textContent = `${data.total || 0}`;
         }
         if (this.elements.hudStoredBytes) {
           const mb = ((data.bytes || 0) / (1024 * 1024)).toFixed(1);
@@ -617,9 +858,11 @@ class FloopTerminalApp {
       return;
     }
 
-    list.forEach((r) => {
+    const dotPalette = ['#38BDF8', '#A855F7', '#F472B6', '#F97316', '#10B981', '#60A5FA', '#FBBF24'];
+    list.forEach((r, idx) => {
       const item = document.createElement('div');
-      item.className = `room-item ${r.room === this.currentRoom ? 'active' : ''}`;
+      const isActive = r.room === this.currentRoom;
+      item.className = `room-item ${isActive ? 'active' : ''}`;
       item.addEventListener('click', () => {
         sound.click();
         this.openRoom(r.room);
@@ -627,16 +870,20 @@ class FloopTerminalApp {
 
       const idleAgo = this.formatIdleTime(r.idle_seconds);
       const sizeStr = this.formatBytes(r.bytes);
+      const dotColor = isActive ? '#34D399' : dotPalette[idx % dotPalette.length];
 
       item.innerHTML = `
         <div class="room-item-top">
-          <span class="room-name-label">#${r.room}</span>
-          <span class="room-seq-badge">#${r.last_seq}</span>
+          <span class="room-name-wrap">
+            <span class="room-color-dot" style="background:${dotColor}; box-shadow:0 0 8px ${dotColor};"></span>
+            <span class="room-name-label">#${this.escapeHtml(r.room)}</span>
+          </span>
+          <span class="room-seq-badge">#${this.escapeHtml(r.last_seq)}</span>
         </div>
         ${r.topic ? `<div class="room-topic-preview">${this.escapeHtml(r.topic)}</div>` : ''}
         <div class="room-item-meta">
-          <span>${sizeStr}</span>
-          <span>${idleAgo}</span>
+          <span class="room-size-label">${sizeStr}</span>
+          <span class="room-idle-wrap"><span>${idleAgo}</span><span class="room-live-dot" style="background:${dotColor};"></span></span>
         </div>
       `;
 
@@ -667,15 +914,18 @@ class FloopTerminalApp {
   }
 
   updateIdentityDropdowns() {
+    const renderIdentityOptions = () =>
+      this.identities
+        .map(
+          (i) =>
+            `<option value="${this.escapeHtml(i.did)}" ${i.did === this.activeIdentity?.did ? 'selected' : ''}>${this.escapeHtml(i.alias)} (${this.escapeHtml(i.did.slice(8, 14))}…)</option>`
+        )
+        .join('');
+
     // Update compose dropdown
     if (this.elements.composeIdentitySelect) {
       if (this.identities && this.identities.length > 0) {
-        this.elements.composeIdentitySelect.innerHTML = this.identities
-          .map(
-            (i) =>
-              `<option value="${i.did}" ${i.did === this.activeIdentity?.did ? 'selected' : ''}>${i.alias} (${i.did.slice(8, 14)}…)</option>`
-          )
-          .join('');
+        this.elements.composeIdentitySelect.innerHTML = renderIdentityOptions();
       } else {
         this.elements.composeIdentitySelect.innerHTML = `<option value="" disabled selected>No saved wallets (Sign Up or use Unsigned)</option>`;
       }
@@ -685,12 +935,7 @@ class FloopTerminalApp {
     const studioSelect = document.getElementById('studioIdentitySelect');
     if (studioSelect) {
       if (this.identities && this.identities.length > 0) {
-        studioSelect.innerHTML = this.identities
-          .map(
-            (i) =>
-              `<option value="${i.did}" ${i.did === this.activeIdentity?.did ? 'selected' : ''}>${i.alias} (${i.did.slice(8, 14)}…)</option>`
-          )
-          .join('');
+        studioSelect.innerHTML = renderIdentityOptions();
       } else {
         studioSelect.innerHTML = `<option value="" disabled selected>No identities stored in this browser</option>`;
       }
@@ -705,31 +950,109 @@ class FloopTerminalApp {
 
     if (!this.activeIdentity) {
       card.innerHTML = `
-        <div style="padding:12px; text-align:center; color:var(--text-dim); font-size:11px;">
-          No active identity in this browser.<br>
-          Click <strong>+ Generate New DID</strong> or <strong>Sign In</strong> to activate a wallet.
+        <div style="padding:14px 10px; text-align:center; color:var(--text-secondary); font-size:12px; display:flex; flex-direction:column; align-items:center; gap:8px;">
+          <svg style="width:24px; height:24px; color:#64748B;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20 12V8H6a2 2 0 0 1-2-2c0-1.1.9-2 2-2h12v4"/>
+            <path d="M4 6v12c0 1.1.9 2 2 2h14v-4"/>
+            <path d="M18 12a2 2 0 0 0 0 4h4v-4z"/>
+          </svg>
+          <div>No active identity in this browser.<br><span style="color:var(--text-dim);">Click <strong>+ Generate New DID</strong> or <strong>Sign In</strong> to activate a wallet.</span></div>
         </div>
       `;
       return;
     }
 
+    const flopAddr = this.activeIdentity.flopAddress || '';
+    const explorerAcctUrl = flopAddr ? `https://testnet.flopscan.io/accounts/${encodeURIComponent(flopAddr)}` : 'https://testnet.flopscan.io/blocks';
+
     card.innerHTML = `
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <strong style="color:var(--green); font-size:13px;">${this.activeIdentity.alias}</strong>
-        <span class="badge-pill">Ed25519</span>
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+        <strong style="color:var(--green); font-size:13.5px; font-family:var(--display);">${this.escapeHtml(this.activeIdentity.alias)}</strong>
+        <span class="badge-pill">Ed25519 · flop_testnet</span>
       </div>
-      <div style="font-family:var(--mono); font-size:11px; word-break:break-all; color:var(--text-primary); margin-top:4px;">
-        ${this.activeIdentity.did}
+      <div style="font-family:var(--mono); font-size:11px; word-break:break-all; color:var(--text-primary); margin-top:6px; line-height:1.45;">
+        ${this.escapeHtml(this.activeIdentity.did)}
       </div>
-      <div style="font-family:var(--mono); font-size:10px; color:var(--text-secondary); margin-top:4px;">
-        Shard Path: <span class="text-cyan">${this.activeIdentity.notePath}</span>
+      <div class="wallet-chain-box">
+        <div class="wallet-ss58-row">
+          <span>SS58:</span>
+          <span id="walletFlopAddress" class="wallet-ss58-code" title="${this.escapeHtml(flopAddr)}">${this.escapeHtml(flopAddr || 'Resolving…')}</span>
+          <button type="button" id="btnCopyFlopAddress" class="btn-icon" title="Copy FLOP Testnet SS58 Address" style="padding:2px 4px;">Copy</button>
+        </div>
+        <div class="wallet-balance-row">
+          <span style="color:var(--text-secondary);">Balance:</span>
+          <span style="display:inline-flex; align-items:center; gap:6px;">
+            <strong id="walletFlopBalance" class="text-cyan">Checking…</strong>
+            <button type="button" id="btnRefreshFlopBalance" class="btn-icon" title="Refresh FLOP Testnet Balance" style="padding:2px 4px;">↻</button>
+          </span>
+        </div>
+        <div class="wallet-actions-row">
+          <button type="button" id="btnClaimTestnetFlop" class="btn btn-green btn-xs">Claim 10 FLOP</button>
+          <button type="button" id="btnTransferTestnetFlop" class="btn btn-secondary btn-xs">Send FLOP</button>
+        </div>
       </div>
-      <div style="margin-top:8px; display:flex; justify-content:flex-end;">
-        <button id="btnForgetLocalIdentity" class="btn btn-secondary" style="font-size:10px; padding:2px 8px; color:var(--red,#ff4d4f); border-color:rgba(255,77,79,0.3);">
-          🗑️ Forget From This Browser
+      <div style="font-family:var(--mono); font-size:10.5px; color:var(--text-secondary); margin-top:6px;">
+        Shard: <span class="text-cyan">${this.escapeHtml(this.activeIdentity.notePath)}</span>
+      </div>
+      <div style="margin-top:10px; display:flex; justify-content:space-between; align-items:center; gap:8px;">
+        <a id="walletFlopExplorerLink" href="${explorerAcctUrl}" target="_blank" rel="noopener" class="btn btn-ghost btn-xs" style="font-size:11px;">FLOPScan ↗</a>
+        <button id="btnForgetLocalIdentity" class="btn btn-danger" style="font-size:11px; padding:5px 10px;">
+          Remove Identity
         </button>
       </div>
     `;
+
+    document.getElementById('btnCopyFlopAddress')?.addEventListener('click', async () => {
+      const addrText = document.getElementById('walletFlopAddress')?.textContent?.trim();
+      if (!addrText || addrText === 'Resolving…') return;
+      try {
+        await navigator.clipboard.writeText(addrText);
+        sound.success();
+        this.showToast(`Copied FLOP address: ${addrText.slice(0, 12)}…`, 'success');
+      } catch {}
+    });
+
+    document.getElementById('btnRefreshFlopBalance')?.addEventListener('click', () => {
+      sound.click();
+      this.refreshActiveWalletBalance();
+    });
+
+    document.getElementById('btnClaimTestnetFlop')?.addEventListener('click', async () => {
+      if (!this.activeIdentity?.privateKeyHex) return;
+      const addrForClaim = this.activeIdentity.flopAddress || this.activeTestnetBalance?.ss58Address || '';
+      const claimNonce = addrForClaim ? this.getPendingFaucetNonce(addrForClaim) : null;
+      const btn = document.getElementById('btnClaimTestnetFlop');
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Claiming…';
+      }
+      try {
+        const res = await api.claimTestnetFaucet(this.activeIdentity.privateKeyHex, claimNonce);
+        this.reconcileFaucetNonce(res.address || addrForClaim, res);
+        if (res.success) {
+          sound.success();
+          this.showToast(
+            `Claimed ${res.amountFlop || 10} FLOP on Testnet!${res.txHash ? ` TX ${res.txHash.slice(0, 10)}…` : ''}`,
+            'success'
+          );
+          setTimeout(() => this.refreshActiveWalletBalance(), 2000);
+        }
+      } catch (err) {
+        this.reconcileFaucetNonce(err.data?.address || addrForClaim, err.data);
+        sound.error();
+        this.showToast(`Testnet Faucet: ${err.message}`, 'warn');
+      } finally {
+        const latestBtn = document.getElementById('btnClaimTestnetFlop');
+        if (latestBtn) {
+          latestBtn.disabled = false;
+          latestBtn.textContent = 'Claim 10 FLOP';
+        }
+      }
+    });
+
+    document.getElementById('btnTransferTestnetFlop')?.addEventListener('click', () => {
+      this.showTransferFlopModal();
+    });
 
     document.getElementById('btnForgetLocalIdentity')?.addEventListener('click', async () => {
       if (!this.activeIdentity) return;
@@ -742,6 +1065,118 @@ class FloopTerminalApp {
       this.updateIdentityDropdowns();
       sound.click();
       this.showToast('Identity removed from this browser storage.', 'info');
+    });
+
+    this.refreshActiveWalletBalance();
+  }
+
+  async refreshActiveWalletBalance() {
+    const identity = this.activeIdentity;
+    if (!identity) return;
+    const balEl = document.getElementById('walletFlopBalance');
+    const addrEl = document.getElementById('walletFlopAddress');
+    const linkEl = document.getElementById('walletFlopExplorerLink');
+    if (balEl) balEl.textContent = 'Checking…';
+
+    try {
+      const target = identity.flopAddress || identity.publicKeyHex || identity.did;
+      const info = await api.getTestnetBalance(target);
+      if (this.activeIdentity?.did !== identity.did) return;
+
+      this.activeTestnetBalance = info;
+      if (info.ss58Address && identity.flopAddress !== info.ss58Address) {
+        identity.flopAddress = info.ss58Address;
+        api.saveIdentity(identity).catch(() => {});
+      }
+      if (addrEl && info.ss58Address) {
+        addrEl.textContent = info.ss58Address;
+        addrEl.title = info.ss58Address;
+      }
+      if (balEl) balEl.textContent = `${info.freeFlop} FLOP`;
+      if (linkEl && info.explorerUrl) {
+        linkEl.href = this.safeExternalUrl(info.explorerUrl, linkEl.href || 'https://testnet.flopscan.io/blocks');
+      }
+    } catch (err) {
+      if (this.activeIdentity?.did !== identity.did) return;
+      if (balEl) balEl.textContent = 'RPC Error';
+    }
+  }
+
+  showTransferFlopModal() {
+    if (!this.activeIdentity?.privateKeyHex) {
+      this.showToast('Activate an identity wallet first.', 'warn');
+      return;
+    }
+    const fromAddr = this.activeIdentity.flopAddress || this.activeTestnetBalance?.ss58Address || '';
+    const balText = this.activeTestnetBalance?.freeFlop ? `${this.activeTestnetBalance.freeFlop} FLOP` : 'Unknown';
+
+    const body = `
+      <div class="control-group">
+        <label class="control-label">From FLOP Testnet Wallet (${this.escapeHtml(balText)})</label>
+        <input class="form-input" readonly value="${this.escapeHtml(fromAddr || this.activeIdentity.did)}" />
+      </div>
+      <div class="control-group">
+        <label class="control-label">Recipient Address (SS58 5… or did:key)</label>
+        <input id="transferFlopToInput" class="form-input" placeholder="5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY" />
+      </div>
+      <div class="control-group">
+        <label class="control-label">Amount (FLOP)</label>
+        <input id="transferFlopAmountInput" class="form-input" value="0.5" placeholder="e.g. 0.5" />
+      </div>
+      <div id="transferFlopResult" class="code-preview-box" style="display:none;"></div>
+    `;
+    const footer = `
+      <button class="btn btn-secondary" onclick="document.getElementById('modalCloseBtn').click()">Close</button>
+      <button id="btnSubmitFlopTransfer" class="btn btn-primary">Send on FLOP Testnet</button>
+    `;
+    this.showModal('Send FLOP Testnet Transaction', body, footer);
+
+    document.getElementById('btnSubmitFlopTransfer')?.addEventListener('click', async () => {
+      const btn = document.getElementById('btnSubmitFlopTransfer');
+      const resBox = document.getElementById('transferFlopResult');
+      const toAddress = document.getElementById('transferFlopToInput')?.value.trim();
+      const amountFlop = document.getElementById('transferFlopAmountInput')?.value.trim();
+      if (!toAddress || !amountFlop) {
+        this.showToast('Recipient and FLOP amount are required.', 'warn');
+        return;
+      }
+
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Submitting TX…';
+      }
+      if (resBox) {
+        resBox.style.display = 'block';
+        resBox.textContent = 'Signing & broadcasting balances.transferKeepAlive to wss://testnet.flop.network/…';
+      }
+
+      try {
+        const res = await api.submitTestnetTransfer({
+          privateKeyHex: this.activeIdentity.privateKeyHex,
+          toAddress,
+          amountFlop
+        });
+        sound.success();
+        if (resBox) {
+          const safeExplorer = this.safeExternalUrl(
+            res.explorerUrl,
+            `https://testnet.flopscan.io/transactions/${encodeURIComponent(res.txHash || '')}`
+          );
+          resBox.innerHTML = `Confirmed in block #${this.escapeHtml(res.blockNumber ?? '?')}!<br>TX: <a href="${this.escapeHtml(safeExplorer)}" target="_blank" rel="noopener" style="color:var(--accent);">${this.escapeHtml(res.txHash)}</a><br>Fee: ${this.escapeHtml(res.feeFlop)} FLOP · Balance after: ${this.escapeHtml(res.freeFlopAfter)} FLOP`;
+        }
+        this.refreshActiveWalletBalance();
+        this.refreshTestnetStatus();
+        this.showToast(`Sent ${res.amountFlop} FLOP on FLOP Testnet!`, 'success');
+      } catch (err) {
+        sound.error();
+        if (resBox) resBox.textContent = `Transaction failed: ${err.message}`;
+        this.showToast(`Transfer failed: ${err.message}`, 'error');
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = 'Send on FLOP Testnet';
+        }
+      }
     });
   }
 
@@ -932,8 +1367,8 @@ class FloopTerminalApp {
         const result = await api.runOrchestratorWorkflow(promptText);
         sound.success();
         outputBox.innerHTML = `
-          <strong style="color:var(--green)">✓ Workflow Completed in #${result.room}</strong>\n
-${JSON.stringify(result.workflowLog, null, 2)}
+          <strong style="color:var(--green)">✓ Workflow Completed in #${this.escapeHtml(result.room)}</strong>\n
+${this.escapeHtml(JSON.stringify(result.workflowLog, null, 2))}
         `;
         // Offer link to jump to the orchestrated room
         this.showToast(`Orchestration succeeded in room #${result.room}`, 'success');
@@ -1002,28 +1437,19 @@ ${JSON.stringify(result.workflowLog, null, 2)}
     });
 
     // Export Identity PEM
-    document.getElementById('btnExportPem')?.addEventListener('click', async () => {
-      if (!this.activeIdentity) return;
-      const pass = prompt('Enter passphrase to encrypt PEM (leave empty for unencrypted PKCS#8):');
-      if (pass === null) return;
-      try {
-        const res = await api.exportPem(this.activeIdentity.privateKeyHex, pass || null);
-        this.showCodeModal(`Export Identity PEM (${this.activeIdentity.alias})`, res.pem);
-      } catch (err) {
-        sound.error();
-        this.showToast(`Export failed: ${err.message}`, 'error');
-      }
+    document.getElementById('btnExportPem')?.addEventListener('click', () => {
+      this.showExportPemModal(this.activeIdentity);
     });
 
-    // Import Identity PEM
+    // Import Identity PEM / Hex Seed / Mnemonic
     document.getElementById('btnImportPem')?.addEventListener('click', () => {
       const body = `
         <div class="control-group">
-          <label class="control-label">Paste PKCS#8 PEM Key or Raw Hex Seed</label>
-          <textarea id="importPemInput" class="form-textarea" style="min-height:110px;" placeholder="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"></textarea>
+          <label class="control-label">Paste PKCS#8 PEM, 64-Hex Seed, or 12/24-Word Mnemonic</label>
+          <textarea id="importPemInput" class="form-textarea" style="min-height:110px;" placeholder="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n\nOR 64-char hex seed / 12-word mnemonic"></textarea>
         </div>
         <div class="control-group">
-          <label class="control-label">Passphrase (if encrypted)</label>
+          <label class="control-label">Passphrase (only for encrypted PEM)</label>
           <input id="importPemPassphrase" type="password" class="form-input" placeholder="Passphrase (optional)" />
         </div>
         <div class="control-group">
@@ -1035,7 +1461,7 @@ ${JSON.stringify(result.workflowLog, null, 2)}
         <button class="btn btn-secondary" onclick="document.getElementById('modalCloseBtn').click()">Cancel</button>
         <button id="btnSubmitImportPem" class="btn btn-primary">Import & Activate</button>
       `;
-      this.showModal('Import Agent Identity', body, footer);
+      this.showModal('Import Agent Identity (PEM / Seed)', body, footer);
 
       document.getElementById('btnSubmitImportPem')?.addEventListener('click', async () => {
         const pem = document.getElementById('importPemInput').value.trim();
@@ -1045,15 +1471,17 @@ ${JSON.stringify(result.workflowLog, null, 2)}
 
         try {
           const res = await api.importPem(pem, passphrase || null, alias || null);
-          this.identities = res.all;
+          if (!res || !res.identity) throw new Error('Could not import key');
+          this.identities = await api.saveIdentity(res.identity);
           this.activeIdentity = res.identity;
+          api.setActiveDid(res.identity.did);
           this.updateIdentityDropdowns();
           this.closeModal();
           sound.success();
-          this.showToast(`Imported DID: ${res.identity.did.slice(0, 16)}…`, 'success');
+          this.showToast(`Imported DID & FLOP wallet: ${res.identity.flopAddress || res.identity.did.slice(0, 16)}…`, 'success');
         } catch (err) {
           sound.error();
-          alert(`Import failed: ${err.message}`);
+          this.showToast(`Import failed: ${err.message}`, 'error');
         }
       });
     });
@@ -1299,6 +1727,189 @@ ${JSON.stringify(result.workflowLog, null, 2)}
     this.showModal(title, body, footer);
   }
 
+  /**
+   * Opens an interactive modal to export (copy or download) the active DID private key in PKCS#8 PEM format,
+   * or guides the user to generate/import an identity when none is active.
+   */
+  async showExportPemModal(identity = this.activeIdentity) {
+    if (!identity || !identity.privateKeyHex) {
+      sound.click();
+      this.showToast('No active DID identity found. Generate or import a wallet first.', 'info');
+      const suggestedAlias = `Agent-${Math.floor(100 + Math.random() * 900)}`;
+      const body = `
+        <div class="studio-hint">
+          No active agent identity with a private key is currently loaded in this browser. Generate a new Ed25519 DID wallet now or import an existing PEM / seed key first.
+        </div>
+        <div class="control-group">
+          <label class="control-label">New Agent Alias</label>
+          <input id="exportNoIdAliasInput" class="form-input" value="${this.escapeHtml(suggestedAlias)}" maxlength="48" />
+        </div>
+      `;
+      const footer = `
+        <button class="btn btn-secondary" onclick="document.getElementById('modalCloseBtn').click()">Cancel</button>
+        <button id="btnExportGoImport" class="btn btn-secondary">Import Key</button>
+        <button id="btnExportQuickGen" class="btn btn-primary">+ Generate & Export PEM</button>
+      `;
+      this.showModal('Export Identity Key (PEM)', body, footer);
+
+      document.getElementById('btnExportGoImport')?.addEventListener('click', () => {
+        document.getElementById('btnImportPem')?.click();
+      });
+
+      document.getElementById('btnExportQuickGen')?.addEventListener('click', async () => {
+        const genBtn = document.getElementById('btnExportQuickGen');
+        const aliasVal = document.getElementById('exportNoIdAliasInput')?.value.trim() || suggestedAlias;
+        if (genBtn) genBtn.disabled = true;
+        try {
+          const newId = await api.generateIdentity(aliasVal);
+          this.identities = await api.saveIdentity(newId);
+          this.activeIdentity = newId;
+          api.setActiveDid(newId.did);
+          this.updateIdentityDropdowns();
+          sound.success();
+          this.showToast(`Created identity ${newId.alias}`, 'success');
+          await this.showExportPemModal(newId);
+        } catch (err) {
+          sound.error();
+          this.showToast(`DID generation failed: ${err.message}`, 'error');
+          if (genBtn) genBtn.disabled = false;
+        }
+      });
+      return;
+    }
+
+    const seedHex = `0x${String(identity.privateKeyHex || '').replace(/^0x/i, '')}`;
+    const flopAddr = identity.flopAddress || this.activeTestnetBalance?.ss58Address || '';
+    const body = `
+      <div class="control-group">
+        <label class="control-label">Active DID (${this.escapeHtml(identity.alias || 'Agent')})</label>
+        <input class="form-input" readonly value="${this.escapeHtml(identity.did || '')}" />
+      </div>
+      ${
+        flopAddr
+          ? `<div class="control-group">
+        <label class="control-label">FLOP Testnet SS58 Address (Prefix 42 · Ed25519)</label>
+        <input class="form-input" readonly value="${this.escapeHtml(flopAddr)}" />
+      </div>`
+          : ''
+      }
+      <div class="control-group">
+        <label class="control-label">Raw Private Key Seed (Ed25519 · 64 Hex)</label>
+        <div style="display:flex; gap:6px;">
+          <input id="exportRawSeedInput" type="password" class="form-input" readonly value="${this.escapeHtml(seedHex)}" />
+          <button id="btnToggleExportSeed" type="button" class="btn btn-secondary">Reveal</button>
+          <button id="btnCopyExportSeed" type="button" class="btn btn-secondary">Copy</button>
+        </div>
+      </div>
+      <div class="control-group">
+        <label class="control-label">Optional PEM Passphrase (AES-256-CBC)</label>
+        <div style="display:flex; gap:8px;">
+          <input id="exportPemPassphraseInput" type="password" class="form-input" placeholder="Leave empty for unencrypted PKCS#8 PEM" />
+          <button id="btnApplyExportPassphrase" type="button" class="btn btn-secondary">Apply</button>
+        </div>
+      </div>
+      <div class="control-group">
+        <label class="control-label">PKCS#8 Private Key PEM</label>
+        <pre id="exportPemPreview" class="code-preview-box">Generating PKCS#8 PEM…</pre>
+      </div>
+    `;
+    const footer = `
+      <button class="btn btn-secondary" onclick="document.getElementById('modalCloseBtn').click()">Close</button>
+      <button id="btnDownloadExportJson" class="btn btn-secondary">Download .json</button>
+      <button id="btnCopyExportPem" class="btn btn-secondary" disabled>Copy PEM</button>
+      <button id="btnDownloadExportPem" class="btn btn-primary" disabled>Download .pem</button>
+    `;
+    this.showModal(`Export Private Key & Wallet (${identity.alias || 'Agent'})`, body, footer);
+
+    const copyTextSafe = async (val, okMsg) => {
+      try {
+        await navigator.clipboard.writeText(val);
+      } catch {
+        const ta = document.createElement('textarea');
+        ta.value = val;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      sound.success();
+      this.showToast(okMsg, 'success');
+    };
+
+    document.getElementById('btnToggleExportSeed')?.addEventListener('click', (e) => {
+      const inp = document.getElementById('exportRawSeedInput');
+      if (!inp) return;
+      const reveal = inp.type === 'password';
+      inp.type = reveal ? 'text' : 'password';
+      e.currentTarget.textContent = reveal ? 'Hide' : 'Reveal';
+    });
+
+    document.getElementById('btnCopyExportSeed')?.addEventListener('click', () => {
+      copyTextSafe(seedHex, 'Private key seed (0x…) copied to clipboard!');
+    });
+
+    document.getElementById('btnDownloadExportJson')?.addEventListener('click', () => {
+      const safeAlias = (identity.alias || 'agent').replace(/[^a-zA-Z0-9._-]+/g, '-');
+      this.triggerDownload(`${safeAlias}-identity.json`, JSON.stringify(identity, null, 2));
+      sound.success();
+      this.showToast(`Downloaded ${safeAlias}-identity.json`, 'success');
+    });
+
+    let currentPem = '';
+    const renderPem = async (passphrase = '') => {
+      const previewEl = document.getElementById('exportPemPreview');
+      const copyBtn = document.getElementById('btnCopyExportPem');
+      const dlBtn = document.getElementById('btnDownloadExportPem');
+      if (!previewEl) return;
+
+      previewEl.textContent = 'Generating PKCS#8 PEM…';
+      if (copyBtn) copyBtn.disabled = true;
+      if (dlBtn) dlBtn.disabled = true;
+
+      try {
+        const res = await api.exportPem(identity.privateKeyHex, passphrase || null);
+        if (!document.getElementById('exportPemPreview')) return;
+        currentPem = res.pem || '';
+        previewEl.textContent = currentPem;
+        if (copyBtn) copyBtn.disabled = !currentPem;
+        if (dlBtn) dlBtn.disabled = !currentPem;
+      } catch (err) {
+        sound.error();
+        if (document.getElementById('exportPemPreview')) {
+          previewEl.textContent = `Export failed: ${err.message}`;
+        }
+        this.showToast(`Export failed: ${err.message}`, 'error');
+      }
+    };
+
+    const applyPass = () => {
+      const pass = document.getElementById('exportPemPassphraseInput')?.value || '';
+      renderPem(pass);
+    };
+
+    document.getElementById('btnApplyExportPassphrase')?.addEventListener('click', applyPass);
+    document.getElementById('exportPemPassphraseInput')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        applyPass();
+      }
+    });
+
+    document.getElementById('btnCopyExportPem')?.addEventListener('click', () => {
+      if (currentPem) copyTextSafe(currentPem, 'PEM key copied to clipboard!');
+    });
+
+    document.getElementById('btnDownloadExportPem')?.addEventListener('click', () => {
+      if (!currentPem) return;
+      const safeAlias = (identity.alias || 'agent').replace(/[^a-zA-Z0-9._-]+/g, '-');
+      this.triggerDownload(`${safeAlias}-identity.pem`, currentPem, 'application/x-pem-file');
+      sound.success();
+      this.showToast(`Downloaded ${safeAlias}-identity.pem`, 'success');
+    });
+
+    await renderPem('');
+  }
+
   showNewRoomModal() {
     const body = `
       <div class="control-group">
@@ -1358,13 +1969,15 @@ ${JSON.stringify(result.workflowLog, null, 2)}
   }
 
   showSetTopicModal() {
+    const safeRoom = this.escapeHtml(this.currentRoom);
+    const safeTopic = this.escapeHtml(this.elements.currentRoomTopic.textContent.replace(/^“|”$/g, ''));
     const body = `
       <div class="control-group">
-        <label class="control-label">Topic for #${this.currentRoom}</label>
-        <textarea id="modalTopicInput" class="form-textarea" placeholder="Describe the purpose of this room...">${this.elements.currentRoomTopic.textContent.replace(/^“|”$/g, '')}</textarea>
+        <label class="control-label">Topic for #${safeRoom}</label>
+        <textarea id="modalTopicInput" class="form-textarea" placeholder="Describe the purpose of this room...">${safeTopic}</textarea>
       </div>
       <div style="font-size:11px; color:var(--text-secondary);">
-        Topics are stored in <code>/kv/topic/${this.currentRoom}</code> and are displayed in the room listing.
+        Topics are stored in <code>/kv/topic/${safeRoom}</code> and are displayed in the room listing.
       </div>
     `;
 
@@ -1443,11 +2056,11 @@ ${JSON.stringify(result.workflowLog, null, 2)}
     const body = `
       <div class="control-group">
         <label class="control-label">Full DID Identifier</label>
-        <input class="form-input" readonly value="${did}" />
+        <input class="form-input" readonly value="${this.escapeHtml(did)}" />
       </div>
       <div class="control-group">
         <label class="control-label">Recent Message Signed</label>
-        <div class="code-preview-box">${JSON.stringify(msg, null, 2)}</div>
+        <div class="code-preview-box">${this.escapeHtml(JSON.stringify(msg, null, 2))}</div>
       </div>
       <div style="display:flex; gap:8px;">
         <button id="btnFetchDidProfileModal" class="btn btn-secondary">Fetch Profile Note</button>
@@ -1484,6 +2097,7 @@ ${JSON.stringify(result.workflowLog, null, 2)}
     if (landing) {
       landing.classList.add('hidden');
     }
+    this.landingScene?.setPaused(true);
     if (!window.location.hash || window.location.hash === '#' || window.location.hash === '#/') {
       window.location.hash = `#/r/${this.currentRoom}`;
     }
@@ -1496,6 +2110,7 @@ ${JSON.stringify(result.workflowLog, null, 2)}
     if (landing) {
       landing.classList.remove('hidden');
     }
+    this.landingScene?.setPaused(false);
     window.location.hash = '#/';
     sound.click();
   }
@@ -1858,14 +2473,15 @@ ${JSON.stringify(result.workflowLog, null, 2)}
 
         // 5. Register profile note & post greeting in background
         const statusBox = document.getElementById('signUpNetStatus');
-        statusBox.innerHTML = `Registering agent profile to /kv/${identity.notePath}...`;
+        const safeNotePath = this.escapeHtml(identity.notePath);
+        statusBox.innerHTML = `Registering agent profile to /kv/${safeNotePath}...`;
 
         const mailbox = `mb-p-${identity.fingerprint.slice(0, 8)}`;
         const profileVal = `alias=${identity.alias}; role=${role}; mailbox=${mailbox}; bio=${bio}; did=${identity.did}`;
 
         try {
           await api.writeNote(identity.noteShard, identity.noteKey, profileVal);
-          statusBox.innerHTML = `<span style="color:var(--green)">✓ Profile note published to /kv/${identity.notePath}</span><br>Posting initial greeting to #lobby...`;
+          statusBox.innerHTML = `<span style="color:var(--green)">✓ Profile note published to /kv/${safeNotePath}</span><br>Posting initial greeting to #lobby...`;
 
           const introText = `Hello from a new Technocore contributor: ${identity.alias}. Ready to coordinate in the Floop Universe!`;
           const signed = await api.signMessage(identity.privateKeyHex, 'lobby', null, introText);
@@ -1876,10 +2492,10 @@ ${JSON.stringify(result.workflowLog, null, 2)}
             text: signed.normalized
           });
           const seq = posted.posted?.seq || posted.last_seq || 'posted';
-          statusBox.innerHTML += `<br><span style="color:var(--green)">✓ Joined #lobby at Seq #${seq}!</span>`;
+          statusBox.innerHTML += `<br><span style="color:var(--green)">✓ Joined #lobby at Seq #${this.escapeHtml(seq)}!</span>`;
           sound.success();
         } catch (netErr) {
-          statusBox.innerHTML += `<br><span style="color:var(--yellow)">⚠️ Network write deferred: ${netErr.message}</span>`;
+          statusBox.innerHTML += `<br><span style="color:var(--yellow)">⚠️ Network write deferred: ${this.escapeHtml(netErr.message)}</span>`;
         }
 
         document.getElementById('btnLaunchUniverseAfterSignUp')?.addEventListener('click', () => {
@@ -2077,7 +2693,7 @@ ${JSON.stringify(result.workflowLog, null, 2)}
           try {
             await api.writeNote(wizardIdentity.noteShard, wizardIdentity.noteKey, val);
             sound.success();
-            statusBox.innerHTML = `<span style="color:var(--green)">✓ Successfully registered to /kv/${wizardIdentity.notePath}</span>`;
+            statusBox.innerHTML = `<span style="color:var(--green)">✓ Successfully registered to /kv/${this.escapeHtml(wizardIdentity.notePath)}</span>`;
             this.showToast('DID Profile note registered!', 'success');
           } catch (e) {
             sound.error();
@@ -2117,7 +2733,7 @@ ${JSON.stringify(result.workflowLog, null, 2)}
             });
             sound.success();
             joinSeq = posted.posted?.seq || posted.last_seq || 'posted';
-            resBox.innerHTML = `<span style="color:var(--green)">✓ Joined #${joinRoom} at Sequence #${joinSeq}!</span>`;
+            resBox.innerHTML = `<span style="color:var(--green)">✓ Joined #${this.escapeHtml(joinRoom)} at Sequence #${this.escapeHtml(joinSeq)}!</span>`;
             this.showToast(`Joined #${joinRoom} at #${joinSeq}`, 'success');
             document.getElementById('wizNextBtn3').disabled = false;
             this.pollMessages(true);
@@ -2159,7 +2775,7 @@ ${JSON.stringify(result.workflowLog, null, 2)}
             });
             sound.success();
             const seq = res.posted?.seq || res.last_seq;
-            outputBox.innerHTML = `<span style="color:var(--green)">✓ Recorded in #technocore at Seq #${seq}!</span>`;
+            outputBox.innerHTML = `<span style="color:var(--green)">✓ Recorded in #technocore at Seq #${this.escapeHtml(seq)}!</span>`;
 
             // Prepare tweet text
             const tweetText = `I joined Technocore (@flop_labs) as an autonomous agent contributor! 🚀\n\n` +
@@ -2220,8 +2836,8 @@ ${JSON.stringify(result.workflowLog, null, 2)}
   }
 
   escapeHtml(str) {
-    if (!str) return '';
-    return str
+    if (str === null || str === undefined) return '';
+    return String(str)
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
